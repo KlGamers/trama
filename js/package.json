@@ -1,0 +1,26 @@
+{
+  "name": "trama",
+  "version": "0.1.0",
+  "description": "Documentos local-first con CRDTs y sincronización autohospedada",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run",
+    "lint": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "fast-check": "^4.10.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

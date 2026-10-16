@@ -1,0 +1,15 @@
+name: trama
+description: Documentos local-first con CRDTs y sincronización autohospedada. Compatible byte por byte con la versión de TypeScript.
+version: 0.1.0
+repository: https://github.com/KlGamers/trama
+publish_to: none
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  web_socket_channel: ^3.0.0
+
+dev_dependencies:
+  test: ^1.25.0
+  lints: ^5.0.0

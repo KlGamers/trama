@@ -109,7 +109,7 @@ class IncOp extends Op {
   final int by;
 }
 
-int width(Op op) => op is SpliceOp ? op.text.runes.length : 1;
+int width(Op op) => switch (op) { SpliceOp() => op.text.runes.length, RmOp() => op.n, _ => 1 };
 
 class Change {
   Change(this.actor, this.seq, this.start, this.time, this.deps, this.ops);

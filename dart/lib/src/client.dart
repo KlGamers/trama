@@ -19,7 +19,13 @@ class SyncError implements Exception {
 typedef Connector = WebSocketChannel Function(Uri uri);
 
 class SyncClient {
-  SyncClient(this.doc, {required this.url, required this.docName, this.token = '', Connector? connect, this.minDelay = const Duration(milliseconds: 250), this.maxDelay = const Duration(seconds: 10)})
+  SyncClient(this.doc,
+      {required this.url,
+      required this.docName,
+      this.token = '',
+      Connector? connect,
+      this.minDelay = const Duration(milliseconds: 250),
+      this.maxDelay = const Duration(seconds: 10)})
       : _connect = connect ?? WebSocketChannel.connect,
         _delay = minDelay;
 

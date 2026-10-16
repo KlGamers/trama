@@ -3,10 +3,10 @@ import 'dart:typed_data';
 
 import 'change.dart';
 import 'codec.dart';
+import 'save.dart';
 import 'seq.dart';
 
 const _root = 'root';
-const _saveMagic = 0x44;
 
 class _Ref {
   const _Ref(this.obj);
@@ -110,11 +110,28 @@ class Doc {
     final p = _pending;
     if (p == null) throw StateError('mutations must happen inside doc.change()');
     final id = OpId(_nextOp, actor);
-    p.add(op);
+    if (!_merge(p, op, id)) p.add(op);
     _exec(op, id);
     _nextOp += width(op);
     _maxOp = _nextOp - 1;
     return id;
+  }
+
+  bool _merge(List<Op> ops, Op op, OpId id) {
+    if (ops.isEmpty) return false;
+    final last = ops.last;
+    if (op is SpliceOp && last is SpliceOp) {
+      final ref = op.ref;
+      if (refKey(last.obj) != refKey(op.obj) || ref == null || ref.a != actor || ref.c != id.c - 1) return false;
+      ops[ops.length - 1] = SpliceOp(last.obj, last.ref, last.text + op.text);
+      return true;
+    }
+    if (op is RmOp && last is RmOp) {
+      if (refKey(last.obj) != refKey(op.obj) || op.elem.a != last.elem.a || op.n != 1 || op.elem.c != last.elem.c - 1) return false;
+      ops[ops.length - 1] = RmOp(last.obj, op.elem, last.n + 1);
+      return true;
+    }
+    return false;
   }
 
   void _commit(Change ch, Uint8List blob, bool apply) {
@@ -130,10 +147,11 @@ class Doc {
     _log.add(_Logged(ch.actor, ch.seq, blob));
   }
 
-  List<Change> apply(Iterable<Uint8List> blobs) {
+  List<Change> apply(Iterable<Uint8List> blobs) => _ingest([for (final b in blobs) (decodeChange(b), b)]);
+
+  List<Change> _ingest(Iterable<(Change, Uint8List)> pairs) {
     if (_pending != null) throw StateError('cannot apply changes inside doc.change()');
-    for (final blob in blobs) {
-      final ch = decodeChange(blob);
+    for (final (ch, blob) in pairs) {
       if ((_vv[ch.actor] ?? 0) >= ch.seq) continue;
       _queue['${ch.actor}:${ch.seq}'] = (ch, blob);
     }
@@ -162,28 +180,16 @@ class Doc {
     return true;
   }
 
-  List<Uint8List> changes([Map<String, int> since = const {}]) =>
-      [for (final e in _log) if (e.seq > (since[e.actor] ?? 0)) e.blob];
+  List<Uint8List> changes([Map<String, int> since = const {}]) => [
+        for (final e in _log)
+          if (e.seq > (since[e.actor] ?? 0)) e.blob
+      ];
 
-  Uint8List save() {
-    final w = Writer()
-      ..u8(_saveMagic)
-      ..u8(1)
-      ..uint(_log.length);
-    for (final e in _log) {
-      w.bytes(e.blob);
-    }
-    return w.done();
-  }
+  Uint8List save() => encodeSave([for (final e in _log) decodeChange(e.blob)]);
 
   static Doc load(Uint8List buf, {String? actor}) {
-    final r = Reader(buf);
-    if (r.u8() != _saveMagic || r.u8() != 1) throw CodecError('not a trama document');
-    final n = r.uint();
-    final blobs = [for (var i = 0; i < n; i++) Uint8List.fromList(r.bytes())];
-    r.end();
     final doc = Doc(actor: actor);
-    doc.apply(blobs);
+    doc._ingest([for (final ch in decodeSave(buf)) (ch, encodeChange(ch))]);
     if (doc.missing > 0) throw CodecError('document is missing changes');
     return doc;
   }
@@ -317,7 +323,10 @@ class MapRef {
 
   _MapObj get _o => _doc._objs[key] as _MapObj;
 
-  List<String> keys() => [for (final e in _o.entries.entries) if (!e.value.del) e.key]..sort();
+  List<String> keys() => [
+        for (final e in _o.entries.entries)
+          if (!e.value.del) e.key
+      ]..sort();
 
   bool has(String k) {
     final e = _o.entries[k];

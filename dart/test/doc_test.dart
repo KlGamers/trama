@@ -28,7 +28,13 @@ void main() {
         r.map('meta').set('lang', 'es');
         r.delete('none');
       });
-      expect(d.toJson(), {'meta': {'lang': 'es'}, 'n': 3, 'ok': true, 'pi': 3.25, 'title': 'Hola'});
+      expect(d.toJson(), {
+        'meta': {'lang': 'es'},
+        'n': 3,
+        'ok': true,
+        'pi': 3.25,
+        'title': 'Hola'
+      });
       expect(d.root.keys(), ['meta', 'n', 'ok', 'pi', 'title']);
     });
 
@@ -60,7 +66,11 @@ void main() {
         l.delete(1);
       });
       expect(d.toJson(), {
-        'items': ['a', 'c', {'done': false}]
+        'items': [
+          'a',
+          'c',
+          {'done': false}
+        ]
       });
     });
 
@@ -210,5 +220,41 @@ void main() {
       expect(x.toJson(), {'c': 1});
       expect((Doc(actor: b)..apply(x.changes())).toJson(), {'c': 1});
     });
+  });
+
+  test('consecutive typing and backspacing merge into single ops', () {
+    final d = Doc(actor: a);
+    final blob = d.change((r) {
+      final t = r.text('t');
+      for (final ch in 'hola mundo'.split('')) {
+        t.insert(t.length, ch);
+      }
+      for (var i = 0; i < 3; i++) {
+        t.delete(t.length - 1, 1);
+      }
+    })!;
+    expect(decodeChange(blob).ops.length, 3);
+    expect((Doc(actor: b)..apply([blob])).toJson(), {'t': 'hola mu'});
+  });
+
+  test('compact save rebuilds changes byte for byte', () {
+    final x = Doc(actor: a), y = Doc(actor: b);
+    for (final ch in 'hola mundo'.split('')) {
+      x.change((r) => r.text('t').insert(r.text('t').length, ch));
+    }
+    for (var i = 0; i < 4; i++) {
+      x.change((r) => r.text('t').delete(r.text('t').length - 1, 1));
+    }
+    y.apply(x.changes());
+    y.change((r) {
+      r.counter('c').increment(3);
+      r.list('l').push(1.5);
+    });
+    x.apply(y.changes());
+    final back = Doc.load(x.save(), actor: c);
+    expect(back.toJson(), x.toJson());
+    String h(Uint8List b) => b.map((v) => v.toRadixString(16).padLeft(2, '0')).join();
+    expect(back.changes().map(h).toList(), x.changes().map(h).toList());
+    expect(() => Doc.load(Uint8List.fromList([0x44, 9])), throwsA(isA<CodecError>()));
   });
 }

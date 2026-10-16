@@ -276,3 +276,22 @@ describe("objects created concurrently under the same key", () => {
     expect(x.toJSON()).toEqual({ k: "valor" });
   });
 });
+
+describe("op merging inside one change", () => {
+  test("consecutive typing becomes one splice and backspacing one removal", () => {
+    const d = new Doc({ actor: A });
+    const blob = d.change((r) => {
+      const t = r.text("t");
+      for (const ch of "hola mundo") t.insert(t.length, ch);
+      t.delete(t.length - 1, 1);
+      t.delete(t.length - 1, 1);
+      t.delete(t.length - 1, 1);
+    })!;
+    const ch = decodeChange(blob);
+    expect(ch.ops.map((o) => o.t)).toEqual([2, 6, 7]);
+    expect(d.toJSON()).toEqual({ t: "hola mu" });
+    const y = new Doc({ actor: B });
+    y.apply([blob]);
+    expect(y.toJSON()).toEqual({ t: "hola mu" });
+  });
+});

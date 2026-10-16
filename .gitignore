@@ -5,3 +5,5 @@ build/
 *.db
 *.db-*
 coverage/
+js/bench/data/
+js/bench/RESULTS.json

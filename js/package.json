@@ -18,9 +18,11 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "@automerge/automerge": "^3.5.0",
     "@types/node": "^22.20.5",
     "fast-check": "^4.10.2",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "yjs": "^13.6.33"
   }
 }

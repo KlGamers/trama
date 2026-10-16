@@ -278,6 +278,7 @@ func Parse(buf []byte) (*Header, error) {
 				if n, err = r.uint(); err == nil && n < 1 {
 					err = r.fail("empty removal")
 				}
+				w = n
 			}
 		case 8:
 			err = firstErr(ref(0, true), uintErr(r))

@@ -18,13 +18,31 @@ export function idKey(id: OpId): string {
   return `${id.c}@${id.a}`;
 }
 
+export class Actors {
+  private idx = new Map<string, number>();
+  of(a: string): number {
+    let i = this.idx.get(a);
+    if (i === undefined) {
+      i = this.idx.size;
+      this.idx.set(a, i);
+    }
+    return i;
+  }
+}
+
 export class Seq<T> {
   private blocks: Block<T>[] = [{ items: [], live: 0 }];
-  private byId = new Map<string, Elem<T>>();
+  private byId = new Map<number, Elem<T>>();
   size = 0;
 
+  constructor(private readonly acts: Actors) {}
+
+  private num(id: OpId): number {
+    return id.c * 65536 + this.acts.of(id.a);
+  }
+
   get(id: OpId): Elem<T> | undefined {
-    return this.byId.get(idKey(id));
+    return this.byId.get(this.num(id));
   }
 
   private first(): Elem<T> | null {
@@ -59,7 +77,7 @@ export class Seq<T> {
       b.live++;
       this.size++;
     }
-    this.byId.set(idKey(e.id), e);
+    this.byId.set(this.num(e.id), e);
     if (b.items.length > MAX) this.split(b);
   }
 

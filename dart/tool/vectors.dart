@@ -59,11 +59,15 @@ Map<String, Object?> scenario(int seed) {
     }
   }
   final blobs = [for (final b in docs.first.changes()) b.map((x) => x.toRadixString(16).padLeft(2, '0')).join()]..shuffle(r);
-  return {'seed': seed, 'blobs': blobs, 'expect': docs.first.toJson()};
+  final save = docs.first.save().map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  return {'seed': seed, 'blobs': blobs, 'save': save, 'expect': docs.first.toJson()};
 }
 
 void main() {
-  final out = {'generator': 'dart', 'scenarios': [for (var i = 1; i <= 60; i++) scenario(i)]};
+  final out = {
+    'generator': 'dart',
+    'scenarios': [for (var i = 1; i <= 60; i++) scenario(i)]
+  };
   File('../conformance/dart.json').writeAsStringSync(const JsonEncoder.withIndent(' ').convert(out));
   final n = (out['scenarios'] as List).fold<int>(0, (a, s) => a + ((s as Map)['blobs'] as List).length);
   stdout.writeln('wrote 60 scenarios, $n changes');

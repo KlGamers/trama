@@ -11,9 +11,12 @@ import {
   encodeChange,
   refKey,
   span,
+  width,
 } from "./change.js";
-import { CodecError, Reader, Writer, hex } from "./codec.js";
-import { type Elem, Seq, idKey } from "./seq.js";
+import { CodecError, hex } from "./codec.js";
+import { decodeSave, encodeSave } from "./save.js";
+import { Actors, type Elem, Seq, idKey } from "./seq.js";
+import { Log } from "./log.js";
 
 type Slot = Val | { obj: string };
 
@@ -34,7 +37,6 @@ export type Json = null | boolean | number | string | Json[] | { [k: string]: Js
 export type VV = Map<string, number>;
 
 const ROOT = "root";
-const SAVE_MAGIC = 0x44;
 
 function isObj(v: Slot): v is { obj: string } {
   return typeof v === "object" && v !== null;
@@ -57,7 +59,8 @@ export class Doc {
   private objs = new Map<string, Obj>([[ROOT, { ref: null, kind: Kind.Map, entries: new Map(), dels: new Map() }]]);
   private vv: VV = new Map();
   private maxOp = 0;
-  private log: { actor: string; seq: number; blob: Uint8Array }[] = [];
+  private log = new Log();
+  private acts = new Actors();
   private queue = new Map<string, { ch: Change; blob: Uint8Array }>();
   private pending: Op[] | null = null;
   private nextOp = 0;
@@ -108,11 +111,28 @@ export class Doc {
   record(op: Op): OpId {
     if (!this.pending) throw new Error("mutations must happen inside doc.change()");
     const id = { c: this.nextOp, a: this.actor };
-    this.pending.push(op);
+    if (!this.merge(op, id)) this.pending.push(op);
     this.exec(op, id);
-    this.nextOp += op.t === OpType.Splice ? [...op.text].length : 1;
+    this.nextOp += width(op);
     this.maxOp = this.nextOp - 1;
     return id;
+  }
+
+  private merge(op: Op, id: OpId): boolean {
+    const ops = this.pending!;
+    const last = ops[ops.length - 1];
+    if (!last || last.t !== op.t) return false;
+    if (op.t === OpType.Splice && last.t === OpType.Splice) {
+      if (refKey(last.obj) !== refKey(op.obj) || !op.ref || op.ref.a !== this.actor || op.ref.c !== id.c - 1) return false;
+      ops[ops.length - 1] = { ...last, text: last.text + op.text };
+      return true;
+    }
+    if (op.t === OpType.Rm && last.t === OpType.Rm) {
+      if (refKey(last.obj) !== refKey(op.obj) || op.elem.a !== last.elem.a || op.n !== 1 || op.elem.c !== last.elem.c - 1) return false;
+      ops[ops.length - 1] = { ...last, elem: op.elem, n: last.n + 1 };
+      return true;
+    }
+    return false;
   }
 
   private commit(ch: Change, blob: Uint8Array, apply: boolean): void {
@@ -120,18 +140,23 @@ export class Doc {
       let c = ch.start;
       for (const op of ch.ops) {
         this.exec(op, { c, a: ch.actor });
-        c += op.t === OpType.Splice ? [...op.text].length : 1;
+        c += width(op);
       }
     }
     this.vv.set(ch.actor, ch.seq);
     this.maxOp = Math.max(this.maxOp, ch.start + span(ch) - 1);
-    this.log.push({ actor: ch.actor, seq: ch.seq, blob });
+    this.log.push(ch.actor, ch.seq, blob);
   }
 
   apply(blobs: Iterable<Uint8Array>): Change[] {
+    const pairs: { ch: Change; blob: Uint8Array }[] = [];
+    for (const blob of blobs) pairs.push({ ch: decodeChange(blob), blob });
+    return this.ingest(pairs);
+  }
+
+  private ingest(pairs: Iterable<{ ch: Change; blob: Uint8Array }>): Change[] {
     if (this.pending) throw new Error("cannot apply changes inside doc.change()");
-    for (const blob of blobs) {
-      const ch = decodeChange(blob);
+    for (const { ch, blob } of pairs) {
       if ((this.vv.get(ch.actor) ?? 0) >= ch.seq) continue;
       this.queue.set(`${ch.actor}:${ch.seq}`, { ch, blob });
     }
@@ -162,24 +187,16 @@ export class Doc {
   }
 
   changes(since: VV = new Map()): Uint8Array[] {
-    return this.log.filter((e) => e.seq > (since.get(e.actor) ?? 0)).map((e) => e.blob);
+    return this.log.since(since);
   }
 
   save(): Uint8Array {
-    const w = new Writer().u8(SAVE_MAGIC).u8(1).uint(this.log.length);
-    for (const e of this.log) w.bytes(e.blob);
-    return w.done();
+    return encodeSave(this.log.all().map((b) => decodeChange(b)));
   }
 
   static load(buf: Uint8Array, opts: { actor?: string } = {}): Doc {
-    const r = new Reader(buf);
-    if (r.u8() !== SAVE_MAGIC || r.u8() !== 1) throw new CodecError("not a trama document");
-    const n = r.uint();
-    const blobs: Uint8Array[] = [];
-    for (let i = 0; i < n; i++) blobs.push(r.bytes().slice());
-    r.end();
     const doc = new Doc(opts);
-    doc.apply(blobs);
+    doc.ingest(decodeSave(buf).map((ch) => ({ ch, blob: encodeChange(ch) })));
     if (doc.missing) throw new CodecError("document is missing changes");
     return doc;
   }
@@ -259,7 +276,7 @@ export class Doc {
   private blank(kind: Kind, ref: ObjRef): Obj {
     if (kind === Kind.Map) return { ref, kind, entries: new Map(), dels: new Map() };
     if (kind === Kind.Counter) return { ref, kind, n: 0 };
-    return { ref, kind, seq: new Seq<Slot>() };
+    return { ref, kind, seq: new Seq<Slot>(this.acts) };
   }
 
   json(key: string = ROOT): Json {

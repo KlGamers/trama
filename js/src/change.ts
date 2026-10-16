@@ -66,7 +66,9 @@ export interface Change {
 }
 
 export function width(op: Op): number {
-  return op.t === OpType.Splice ? [...op.text].length : 1;
+  if (op.t === OpType.Splice) return [...op.text].length;
+  if (op.t === OpType.Rm) return op.n;
+  return 1;
 }
 
 export function span(ch: Change): number {

@@ -79,7 +79,7 @@ function scenario(seed) {
     const j = pick(i + 1);
     [blobs[i], blobs[j]] = [blobs[j], blobs[i]];
   }
-  return { seed, blobs, expect: docs[0].toJSON() };
+  return { seed, blobs, save: Buffer.from(docs[0].save()).toString("hex"), expect: docs[0].toJSON() };
 }
 
 const out = { generator: "typescript", scenarios: Array.from({ length: 60 }, (_, i) => scenario(i + 1)) };

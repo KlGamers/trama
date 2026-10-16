@@ -21,6 +21,9 @@ void main() {
         final d = Doc(actor: 'e' * 32)..apply(blobs);
         expect(d.missing, 0);
         expect(d.toJson(), s['expect']);
+        final loaded = Doc.load(unhex(s['save'] as String));
+        expect(loaded.toJson(), s['expect']);
+        expect(loaded.changes().map(hexOf).toSet(), (s['blobs'] as List).cast<String>().toSet());
       });
     }
   });

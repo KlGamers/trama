@@ -232,3 +232,47 @@ describe("binary format", () => {
     expect(() => new Doc({ actor: "nope" })).toThrow(TypeError);
   });
 });
+
+describe("objects created concurrently under the same key", () => {
+  test("two replicas creating the same counter, text and map merge their edits", () => {
+    const x = new Doc({ actor: A });
+    const y = new Doc({ actor: B });
+    x.change((r) => {
+      r.counter("c").increment(2);
+      r.text("t").insert(0, "hola");
+      r.map("m").set("x", 1);
+    });
+    y.change((r) => {
+      r.counter("c").increment(5);
+      r.text("t").insert(0, "dart ");
+      r.map("m").set("y", 2);
+    });
+    sync(x, y);
+    expect(x.toJSON()).toEqual(y.toJSON());
+    const j = x.toJSON() as { c: number; t: string; m: object };
+    expect(j.c).toBe(7);
+    expect(j.m).toEqual({ x: 1, y: 2 });
+    expect(j.t === "dart hola" || j.t === "holadart ").toBe(true);
+  });
+
+  test("deleting and recreating starts from scratch", () => {
+    const x = new Doc({ actor: A });
+    x.change((r) => r.counter("c").increment(10));
+    x.change((r) => r.delete("c"));
+    x.change((r) => r.counter("c").increment(1));
+    expect(x.toJSON()).toEqual({ c: 1 });
+    const y = new Doc({ actor: B });
+    y.apply(x.changes());
+    expect(y.toJSON()).toEqual({ c: 1 });
+  });
+
+  test("a value written over the object wins by op id, the object survives for later reads", () => {
+    const x = new Doc({ actor: A });
+    const y = new Doc({ actor: B });
+    x.change((r) => r.text("k").insert(0, "texto"));
+    y.change((r) => r.set("k", "valor"));
+    sync(x, y);
+    expect(x.toJSON()).toEqual(y.toJSON());
+    expect(x.toJSON()).toEqual({ k: "valor" });
+  });
+});

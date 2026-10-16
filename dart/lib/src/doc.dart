@@ -20,26 +20,26 @@ class _Entry {
   final bool del;
 }
 
-sealed class _Obj {}
+sealed class _Obj {
+  _Obj(this.ref);
+  final Object? ref;
+}
 
 class _MapObj extends _Obj {
+  _MapObj(super.ref);
   final Map<String, _Entry> entries = {};
+  final Map<String, OpId> dels = {};
 }
 
 class _SeqObj extends _Obj {
-  _SeqObj(this.text);
+  _SeqObj(super.ref, this.text);
   final bool text;
   final Seq<Object?> seq = Seq<Object?>();
 }
 
 class _CounterObj extends _Obj {
+  _CounterObj(super.ref);
   int n = 0;
-}
-
-OpId? _objId(String key) {
-  if (key == _root) return null;
-  final at = key.indexOf('@');
-  return OpId(int.parse(key.substring(0, at)), key.substring(at + 1));
 }
 
 final _actorRe = RegExp(r'^[0-9a-f]{32}$');
@@ -64,7 +64,7 @@ class Doc {
   }
 
   final String actor;
-  final Map<String, _Obj> _objs = {_root: _MapObj()};
+  final Map<String, _Obj> _objs = {_root: _MapObj(null)};
   final Map<String, int> _vv = {};
   int _maxOp = 0;
   final List<_Logged> _log = [];
@@ -73,7 +73,7 @@ class Doc {
   int _nextOp = 0;
   final Set<Listener> _subs = {};
 
-  MapRef get root => MapRef._(this, _root);
+  MapRef get root => MapRef._(this, null);
 
   Map<String, int> version() => Map.of(_vv);
 
@@ -194,15 +194,15 @@ class Doc {
     }
   }
 
-  _Obj _blank(Kind kind) => switch (kind) {
-        Kind.map => _MapObj(),
-        Kind.counter => _CounterObj(),
-        Kind.list => _SeqObj(false),
-        Kind.text => _SeqObj(true),
+  _Obj _blank(Kind kind, Object? ref) => switch (kind) {
+        Kind.map => _MapObj(ref),
+        Kind.counter => _CounterObj(ref),
+        Kind.list => _SeqObj(ref, false),
+        Kind.text => _SeqObj(ref, true),
       };
 
   void _exec(Op op, OpId id) {
-    final OpId? objRef = switch (op) {
+    final Object? objRef = switch (op) {
       SetOp() => op.obj,
       MakeOp() => op.obj,
       DelOp() => op.obj,
@@ -212,23 +212,26 @@ class Doc {
       RmOp() => op.obj,
       IncOp() => op.obj,
     };
-    final target = _objs[objRef == null ? _root : objRef.key];
+    final target = _objs[refKey(objRef)];
     if (target == null) return;
     switch (op) {
       case SetOp() || MakeOp() || DelOp():
         if (target is! _MapObj) return;
         final key = switch (op) { SetOp() => op.key, MakeOp() => op.key, DelOp() => op.key, _ => '' };
-        final cur = target.entries[key];
-        if (cur != null && cur.id.compareTo(id) >= 0) {
-          if (op is MakeOp) _objs[id.key] = _blank(op.kind);
-          return;
-        }
         Object? val;
-        if (op is SetOp) val = op.val;
         if (op is MakeOp) {
-          _objs[id.key] = _blank(op.kind);
-          val = _Ref(id.key);
+          final child = KeyRef(op.obj, op.key, op.kind, op.epoch);
+          final ck = refKey(child);
+          _objs.putIfAbsent(ck, () => _blank(op.kind, child));
+          val = _Ref(ck);
         }
+        if (op is DelOp) {
+          final last = target.dels[key];
+          if (last == null || id.compareTo(last) > 0) target.dels[key] = id;
+        }
+        if (op is SetOp) val = op.val;
+        final cur = target.entries[key];
+        if (cur != null && cur.id.compareTo(id) >= 0) return;
         target.entries[key] = _Entry(id, val, op is DelOp);
       case InsOp() || InsMakeOp() || SpliceOp():
         if (target is! _SeqObj) return;
@@ -249,7 +252,7 @@ class Doc {
         Object? val;
         if (op is InsOp) val = op.val;
         if (op is InsMakeOp) {
-          _objs[id.key] = _blank(op.kind);
+          _objs[id.key] = _blank(op.kind, id);
           val = _Ref(id.key);
         }
         target.seq.integrate(ref, id, val);
@@ -299,16 +302,17 @@ Object? _wrap(Doc doc, Object? v) {
   if (v is! _Ref) return v;
   final o = doc._objs[v.obj]!;
   return switch (o) {
-    _MapObj() => MapRef._(doc, v.obj),
-    _SeqObj(text: true) => TextRef._(doc, v.obj),
-    _SeqObj() => ListRef._(doc, v.obj),
-    _CounterObj() => CounterRef._(doc, v.obj),
+    _MapObj() => MapRef._(doc, o.ref),
+    _SeqObj(text: true) => TextRef._(doc, o.ref),
+    _SeqObj() => ListRef._(doc, o.ref),
+    _CounterObj() => CounterRef._(doc, o.ref),
   };
 }
 
 class MapRef {
-  MapRef._(this._doc, this.key);
+  MapRef._(this._doc, this.ref) : key = refKey(ref);
   final Doc _doc;
+  final Object? ref;
   final String key;
 
   _MapObj get _o => _doc._objs[key] as _MapObj;
@@ -328,27 +332,28 @@ class MapRef {
 
   void set(String k, Object? v) {
     checkVal(v);
-    _doc._record(SetOp(_objId(key), k, v));
+    _doc._record(SetOp(ref, k, v));
   }
 
   void delete(String k) {
-    if (has(k)) _doc._record(DelOp(_objId(key), k));
+    if (has(k)) _doc._record(DelOp(ref, k));
   }
 
-  String _ensure(String k, Kind kind) {
+  Object? _ensure(String k, Kind kind) {
     final e = _o.entries[k];
     if (e != null && !e.del && e.val is _Ref) {
-      final ref = e.val as _Ref;
-      final o = _doc._objs[ref.obj]!;
+      final o = _doc._objs[(e.val as _Ref).obj]!;
       final ok = switch (kind) {
         Kind.map => o is _MapObj,
         Kind.counter => o is _CounterObj,
         Kind.list => o is _SeqObj && !o.text,
         Kind.text => o is _SeqObj && o.text,
       };
-      if (ok) return ref.obj;
+      if (ok) return o.ref;
     }
-    return _doc._record(MakeOp(_objId(key), k, kind)).key;
+    final epoch = _o.dels[k];
+    _doc._record(MakeOp(ref, k, kind, epoch));
+    return KeyRef(ref, k, kind, epoch);
   }
 
   MapRef map(String k) => MapRef._(_doc, _ensure(k, Kind.map));
@@ -360,15 +365,16 @@ class MapRef {
 }
 
 abstract class _SeqRef {
-  _SeqRef(this._doc, this.key);
+  _SeqRef(this._doc, this.ref) : key = refKey(ref);
   final Doc _doc;
+  final Object? ref;
   final String key;
 
   Seq<Object?> get _seq => (_doc._objs[key] as _SeqObj).seq;
 
   int get length => _seq.size;
 
-  OpId? _ref(int index) {
+  OpId? _at(int index) {
     if (index < 0 || index > _seq.size) throw RangeError('index $index out of range');
     return index == 0 ? null : _seq.at(index - 1).id;
   }
@@ -384,7 +390,7 @@ abstract class _SeqRef {
       while (i + run < els.length && els[i + run].id.a == first.id.a && els[i + run].id.c == first.id.c + run) {
         run++;
       }
-      _doc._record(RmOp(_objId(key)!, first.id, run));
+      _doc._record(RmOp(ref!, first.id, run));
       i += run;
     }
   }
@@ -393,18 +399,18 @@ abstract class _SeqRef {
 }
 
 class ListRef extends _SeqRef {
-  ListRef._(super.doc, super.key);
+  ListRef._(super.doc, super.ref);
 
   Object? get(int index) => _wrap(_doc, _seq.at(index).val);
 
   void insert(int index, Object? v) {
     checkVal(v);
-    _doc._record(InsOp(_objId(key)!, _ref(index), v));
+    _doc._record(InsOp(ref!, _at(index), v));
   }
 
   void push(Object? v) => insert(length, v);
 
-  String _make(int index, Kind kind) => _doc._record(InsMakeOp(_objId(key)!, _ref(index), kind)).key;
+  OpId _make(int index, Kind kind) => _doc._record(InsMakeOp(ref!, _at(index), kind));
 
   MapRef insertMap(int index) => MapRef._(_doc, _make(index, Kind.map));
   ListRef insertList(int index) => ListRef._(_doc, _make(index, Kind.list));
@@ -414,11 +420,11 @@ class ListRef extends _SeqRef {
 }
 
 class TextRef extends _SeqRef {
-  TextRef._(super.doc, super.key);
+  TextRef._(super.doc, super.ref);
 
   void insert(int index, String s) {
     if (s.isEmpty) return;
-    _doc._record(SpliceOp(_objId(key)!, _ref(index), s));
+    _doc._record(SpliceOp(ref!, _at(index), s));
   }
 
   @override
@@ -426,15 +432,16 @@ class TextRef extends _SeqRef {
 }
 
 class CounterRef {
-  CounterRef._(this._doc, this.key);
+  CounterRef._(this._doc, this.ref) : key = refKey(ref);
   final Doc _doc;
+  final Object? ref;
   final String key;
 
   int get value => (_doc._objs[key] as _CounterObj).n;
 
   void increment([int by = 1]) {
     if (by.abs() > maxSafe) throw ArgumentError('increment out of range');
-    _doc._record(IncOp(_objId(key)!, by));
+    _doc._record(IncOp(ref!, by));
   }
 
   Object? toJson() => value;

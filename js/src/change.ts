@@ -27,15 +27,34 @@ export interface OpId {
   a: string;
 }
 
+export interface KeyRef {
+  parent: ObjRef;
+  key: string;
+  kind: Kind;
+  epoch: OpId | null;
+}
+
+export type ObjRef = null | OpId | KeyRef;
+
+export function isKeyRef(r: ObjRef): r is KeyRef {
+  return r !== null && "parent" in r;
+}
+
+export function refKey(r: ObjRef): string {
+  if (r === null) return "root";
+  if (isKeyRef(r)) return `${refKey(r.parent)}\u0001${r.key}\u0001${r.kind}\u0001${r.epoch ? `${r.epoch.c}@${r.epoch.a}` : ""}`;
+  return `${r.c}@${r.a}`;
+}
+
 export type Op =
-  | { t: OpType.Set; obj: OpId | null; key: string; val: Val }
-  | { t: OpType.Make; obj: OpId | null; key: string; kind: Kind }
-  | { t: OpType.Del; obj: OpId | null; key: string }
-  | { t: OpType.Ins; obj: OpId; ref: OpId | null; val: Val }
-  | { t: OpType.InsMake; obj: OpId; ref: OpId | null; kind: Kind }
-  | { t: OpType.Splice; obj: OpId; ref: OpId | null; text: string }
-  | { t: OpType.Rm; obj: OpId; elem: OpId; n: number }
-  | { t: OpType.Inc; obj: OpId; by: number };
+  | { t: OpType.Set; obj: ObjRef; key: string; val: Val }
+  | { t: OpType.Make; obj: ObjRef; key: string; kind: Kind; epoch: OpId | null }
+  | { t: OpType.Del; obj: ObjRef; key: string }
+  | { t: OpType.Ins; obj: ObjRef; ref: OpId | null; val: Val }
+  | { t: OpType.InsMake; obj: ObjRef; ref: OpId | null; kind: Kind }
+  | { t: OpType.Splice; obj: ObjRef; ref: OpId | null; text: string }
+  | { t: OpType.Rm; obj: ObjRef; elem: OpId; n: number }
+  | { t: OpType.Inc; obj: ObjRef; by: number };
 
 export interface Change {
   actor: string;
@@ -57,7 +76,8 @@ export function span(ch: Change): number {
 }
 
 const MAGIC = 0x54;
-const VERSION = 1;
+const VERSION = 2;
+const MAX_DEPTH = 64;
 
 class Actors {
   list: string[] = [];
@@ -81,6 +101,20 @@ function putId(w: Writer, acts: Actors, id: OpId | null): void {
   }
   w.uint(id.c);
   w.uint(acts.add(id.a));
+}
+
+function putRef(w: Writer, acts: Actors, r: ObjRef): void {
+  if (r === null) {
+    w.u8(0);
+  } else if (isKeyRef(r)) {
+    w.u8(2);
+    putRef(w, acts, r.parent);
+    w.str(r.key).u8(r.kind);
+    putId(w, acts, r.epoch);
+  } else {
+    w.u8(1);
+    putId(w, acts, r);
+  }
 }
 
 function putVal(w: Writer, v: Val): void {
@@ -130,40 +164,41 @@ export function encodeChange(ch: Change): Uint8Array {
     body.u8(op.t);
     switch (op.t) {
       case OpType.Set:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         body.str(op.key);
         putVal(body, op.val);
         break;
       case OpType.Make:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         body.str(op.key).u8(op.kind);
+        putId(body, acts, op.epoch);
         break;
       case OpType.Del:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         body.str(op.key);
         break;
       case OpType.Ins:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         putId(body, acts, op.ref);
         putVal(body, op.val);
         break;
       case OpType.InsMake:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         putId(body, acts, op.ref);
         body.u8(op.kind);
         break;
       case OpType.Splice:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         putId(body, acts, op.ref);
         body.str(op.text);
         break;
       case OpType.Rm:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         putId(body, acts, op.elem);
         body.uint(op.n);
         break;
       case OpType.Inc:
-        putId(body, acts, op.obj);
+        putRef(body, acts, op.obj);
         body.int(op.by);
         break;
     }
@@ -197,8 +232,24 @@ export function decodeChange(buf: Uint8Array): Change {
   };
   const needId = (): OpId => {
     const id = getId();
-    if (id === null) throw new CodecError("missing object id");
+    if (id === null) throw new CodecError("missing element id");
     return id;
+  };
+  const getRef = (depth: number): ObjRef => {
+    if (depth > MAX_DEPTH) throw new CodecError("object reference too deep");
+    const tag = r.u8();
+    if (tag === 0) return null;
+    if (tag === 1) return needId();
+    if (tag !== 2) throw new CodecError(`unknown reference tag ${tag}`);
+    const parent = getRef(depth + 1);
+    const key = r.str();
+    const kind = getKind(r);
+    return { parent, key, kind, epoch: getId() };
+  };
+  const needRef = (): ObjRef => {
+    const ref = getRef(0);
+    if (ref === null) throw new CodecError("sequence and counter ops need an object");
+    return ref;
   };
   const seq = r.uint();
   const start = r.uint();
@@ -219,22 +270,22 @@ export function decodeChange(buf: Uint8Array): Change {
     const t = r.u8();
     switch (t) {
       case OpType.Set:
-        ops.push({ t, obj: getId(), key: r.str(), val: getVal(r) });
+        ops.push({ t, obj: getRef(0), key: r.str(), val: getVal(r) });
         break;
       case OpType.Make:
-        ops.push({ t, obj: getId(), key: r.str(), kind: getKind(r) });
+        ops.push({ t, obj: getRef(0), key: r.str(), kind: getKind(r), epoch: getId() });
         break;
       case OpType.Del:
-        ops.push({ t, obj: getId(), key: r.str() });
+        ops.push({ t, obj: getRef(0), key: r.str() });
         break;
       case OpType.Ins:
-        ops.push({ t, obj: needId(), ref: getId(), val: getVal(r) });
+        ops.push({ t, obj: needRef(), ref: getId(), val: getVal(r) });
         break;
       case OpType.InsMake:
-        ops.push({ t, obj: needId(), ref: getId(), kind: getKind(r) });
+        ops.push({ t, obj: needRef(), ref: getId(), kind: getKind(r) });
         break;
       case OpType.Splice: {
-        const obj = needId();
+        const obj = needRef();
         const ref = getId();
         const text = r.str();
         if (text.length === 0) throw new CodecError("empty splice");
@@ -242,7 +293,7 @@ export function decodeChange(buf: Uint8Array): Change {
         break;
       }
       case OpType.Rm: {
-        const obj = needId();
+        const obj = needRef();
         const elem = needId();
         const n = r.uint();
         if (n < 1) throw new CodecError("empty removal");
@@ -250,7 +301,7 @@ export function decodeChange(buf: Uint8Array): Change {
         break;
       }
       case OpType.Inc:
-        ops.push({ t, obj: needId(), by: r.int() });
+        ops.push({ t, obj: needRef(), by: r.int() });
         break;
       default:
         throw new CodecError(`unknown op type ${t}`);

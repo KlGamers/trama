@@ -1,6 +1,7 @@
 import {
   type Change,
   Kind,
+  type ObjRef,
   type Op,
   type OpId,
   OpType,
@@ -8,6 +9,7 @@ import {
   cmpId,
   decodeChange,
   encodeChange,
+  refKey,
   span,
 } from "./change.js";
 import { CodecError, Reader, Writer, hex } from "./codec.js";
@@ -21,10 +23,11 @@ interface Entry {
   del: boolean;
 }
 
-type Obj =
-  | { kind: Kind.Map; entries: Map<string, Entry> }
+type Obj = { ref: ObjRef } & (
+  | { kind: Kind.Map; entries: Map<string, Entry>; dels: Map<string, OpId> }
   | { kind: Kind.List | Kind.Text; seq: Seq<Slot> }
-  | { kind: Kind.Counter; n: number };
+  | { kind: Kind.Counter; n: number }
+);
 
 export type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
@@ -35,12 +38,6 @@ const SAVE_MAGIC = 0x44;
 
 function isObj(v: Slot): v is { obj: string } {
   return typeof v === "object" && v !== null;
-}
-
-function objId(key: string): OpId | null {
-  if (key === ROOT) return null;
-  const at = key.indexOf("@");
-  return { c: Number(key.slice(0, at)), a: key.slice(at + 1) };
 }
 
 function newActor(): string {
@@ -57,7 +54,7 @@ function checkVal(v: unknown): asserts v is Val {
 
 export class Doc {
   readonly actor: string;
-  private objs = new Map<string, Obj>([[ROOT, { kind: Kind.Map, entries: new Map() }]]);
+  private objs = new Map<string, Obj>([[ROOT, { ref: null, kind: Kind.Map, entries: new Map(), dels: new Map() }]]);
   private vv: VV = new Map();
   private maxOp = 0;
   private log: { actor: string; seq: number; blob: Uint8Array }[] = [];
@@ -73,7 +70,7 @@ export class Doc {
   }
 
   get root(): MapRef {
-    return new MapRef(this, ROOT);
+    return new MapRef(this, null);
   }
 
   version(): VV {
@@ -196,25 +193,27 @@ export class Doc {
   }
 
   private exec(op: Op, id: OpId): void {
-    const okey = op.obj === null ? ROOT : idKey(op.obj);
-    const target = this.objs.get(okey);
+    const target = this.objs.get(refKey(op.obj));
     if (!target) return;
     switch (op.t) {
       case OpType.Set:
       case OpType.Make:
       case OpType.Del: {
         if (target.kind !== Kind.Map) return;
-        const cur = target.entries.get(op.key);
-        if (cur && cmpId(cur.id, id) >= 0) {
-          if (op.t === OpType.Make) this.objs.set(idKey(id), this.blank(op.kind));
-          return;
-        }
         let val: Slot = null;
-        if (op.t === OpType.Set) val = op.val;
         if (op.t === OpType.Make) {
-          this.objs.set(idKey(id), this.blank(op.kind));
-          val = { obj: idKey(id) };
+          const child: ObjRef = { parent: op.obj, key: op.key, kind: op.kind, epoch: op.epoch };
+          const ck = refKey(child);
+          if (!this.objs.has(ck)) this.objs.set(ck, this.blank(op.kind, child));
+          val = { obj: ck };
         }
+        if (op.t === OpType.Del) {
+          const last = target.dels.get(op.key);
+          if (!last || cmpId(id, last) > 0) target.dels.set(op.key, id);
+        }
+        if (op.t === OpType.Set) val = op.val;
+        const cur = target.entries.get(op.key);
+        if (cur && cmpId(cur.id, id) >= 0) return;
         target.entries.set(op.key, { id, val, del: op.t === OpType.Del });
         return;
       }
@@ -237,7 +236,7 @@ export class Doc {
           return;
         }
         let val: Slot = op.t === OpType.Ins ? op.val : { obj: idKey(id) };
-        if (op.t === OpType.InsMake) this.objs.set(idKey(id), this.blank(op.kind));
+        if (op.t === OpType.InsMake) this.objs.set(idKey(id), this.blank(op.kind, id));
         target.seq.integrate(ref, id, val);
         return;
       }
@@ -257,10 +256,10 @@ export class Doc {
     }
   }
 
-  private blank(kind: Kind): Obj {
-    if (kind === Kind.Map) return { kind, entries: new Map() };
-    if (kind === Kind.Counter) return { kind, n: 0 };
-    return { kind, seq: new Seq<Slot>() };
+  private blank(kind: Kind, ref: ObjRef): Obj {
+    if (kind === Kind.Map) return { ref, kind, entries: new Map(), dels: new Map() };
+    if (kind === Kind.Counter) return { ref, kind, n: 0 };
+    return { ref, kind, seq: new Seq<Slot>() };
   }
 
   json(key: string = ROOT): Json {
@@ -303,19 +302,28 @@ function wrap(doc: Doc, v: Slot): Value {
   const o = doc.obj(v.obj)!;
   switch (o.kind) {
     case Kind.Map:
-      return new MapRef(doc, v.obj);
+      return new MapRef(doc, o.ref);
     case Kind.List:
-      return new ListRef(doc, v.obj);
+      return new ListRef(doc, o.ref);
     case Kind.Text:
-      return new TextRef(doc, v.obj);
+      return new TextRef(doc, o.ref);
     case Kind.Counter:
-      return new CounterRef(doc, v.obj);
+      return new CounterRef(doc, o.ref);
   }
 }
 
-export class MapRef {
-  constructor(private readonly doc: Doc, readonly key: string) {}
+abstract class Ref {
+  readonly key: string;
+  constructor(protected readonly doc: Doc, readonly ref: ObjRef) {
+    this.key = refKey(ref);
+  }
 
+  toJSON(): Json {
+    return this.doc.json(this.key);
+  }
+}
+
+export class MapRef extends Ref {
   private get o(): Extract<Obj, { kind: Kind.Map }> {
     return this.doc.obj(this.key) as Extract<Obj, { kind: Kind.Map }>;
   }
@@ -337,17 +345,22 @@ export class MapRef {
 
   set(k: string, v: Val): void {
     checkVal(v);
-    this.doc.record({ t: OpType.Set, obj: objId(this.key), key: k, val: v });
+    this.doc.record({ t: OpType.Set, obj: this.ref, key: k, val: v });
   }
 
   delete(k: string): void {
-    if (this.has(k)) this.doc.record({ t: OpType.Del, obj: objId(this.key), key: k });
+    if (this.has(k)) this.doc.record({ t: OpType.Del, obj: this.ref, key: k });
   }
 
-  private ensure(k: string, kind: Kind): string {
+  private ensure(k: string, kind: Kind): ObjRef {
     const e = this.o.entries.get(k);
-    if (e && !e.del && isObj(e.val) && this.doc.obj(e.val.obj)!.kind === kind) return e.val.obj;
-    return idKey(this.doc.record({ t: OpType.Make, obj: objId(this.key), key: k, kind }));
+    if (e && !e.del && isObj(e.val)) {
+      const o = this.doc.obj(e.val.obj)!;
+      if (o.kind === kind) return o.ref;
+    }
+    const epoch = this.o.dels.get(k) ?? null;
+    this.doc.record({ t: OpType.Make, obj: this.ref, key: k, kind, epoch });
+    return { parent: this.ref, key: k, kind, epoch };
   }
 
   map(k: string): MapRef {
@@ -365,15 +378,9 @@ export class MapRef {
   counter(k: string): CounterRef {
     return new CounterRef(this.doc, this.ensure(k, Kind.Counter));
   }
-
-  toJSON(): Json {
-    return this.doc.json(this.key);
-  }
 }
 
-abstract class SeqRef {
-  constructor(protected readonly doc: Doc, readonly key: string) {}
-
+abstract class SeqRef extends Ref {
   protected get seq(): Seq<Slot> {
     return (this.doc.obj(this.key) as Extract<Obj, { kind: Kind.List | Kind.Text }>).seq;
   }
@@ -382,7 +389,7 @@ abstract class SeqRef {
     return this.seq.size;
   }
 
-  protected ref(index: number): OpId | null {
+  protected at(index: number): OpId | null {
     if (index < 0 || index > this.seq.size) throw new RangeError(`index ${index} out of range`);
     return index === 0 ? null : this.seq.at(index - 1).id;
   }
@@ -400,13 +407,9 @@ abstract class SeqRef {
         els[i + run]!.id.a === first.id.a &&
         els[i + run]!.id.c === first.id.c + run
       ) run++;
-      this.doc.record({ t: OpType.Rm, obj: objId(this.key)!, elem: first.id, n: run });
+      this.doc.record({ t: OpType.Rm, obj: this.ref, elem: first.id, n: run });
       i += run;
     }
-  }
-
-  toJSON(): Json {
-    return this.doc.json(this.key);
   }
 }
 
@@ -417,15 +420,15 @@ export class ListRef extends SeqRef {
 
   insert(index: number, v: Val): void {
     checkVal(v);
-    this.doc.record({ t: OpType.Ins, obj: objId(this.key)!, ref: this.ref(index), val: v });
+    this.doc.record({ t: OpType.Ins, obj: this.ref, ref: this.at(index), val: v });
   }
 
   push(v: Val): void {
     this.insert(this.length, v);
   }
 
-  private make(index: number, kind: Kind): string {
-    return idKey(this.doc.record({ t: OpType.InsMake, obj: objId(this.key)!, ref: this.ref(index), kind }));
+  private make(index: number, kind: Kind): OpId {
+    return this.doc.record({ t: OpType.InsMake, obj: this.ref, ref: this.at(index), kind });
   }
 
   insertMap(index: number): MapRef {
@@ -448,7 +451,7 @@ export class ListRef extends SeqRef {
 export class TextRef extends SeqRef {
   insert(index: number, s: string): void {
     if (s.length === 0) return;
-    this.doc.record({ t: OpType.Splice, obj: objId(this.key)!, ref: this.ref(index), text: s });
+    this.doc.record({ t: OpType.Splice, obj: this.ref, ref: this.at(index), text: s });
   }
 
   toString(): string {
@@ -456,19 +459,17 @@ export class TextRef extends SeqRef {
   }
 }
 
-export class CounterRef {
-  constructor(private readonly doc: Doc, readonly key: string) {}
-
+export class CounterRef extends Ref {
   get value(): number {
     return (this.doc.obj(this.key) as Extract<Obj, { kind: Kind.Counter }>).n;
   }
 
   increment(by = 1): void {
     if (!Number.isSafeInteger(by)) throw new TypeError("counter increments must be integers");
-    this.doc.record({ t: OpType.Inc, obj: objId(this.key)!, by });
+    this.doc.record({ t: OpType.Inc, obj: this.ref, by });
   }
 
-  toJSON(): Json {
+  override toJSON(): Json {
     return this.value;
   }
 }

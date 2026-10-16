@@ -73,7 +73,7 @@ func TestRejectsCorruption(t *testing.T) {
 			Parse(c)
 		}
 	}
-	for _, b := range [][]byte{nil, {0x54}, {0x00, 1}, {0x54, 2}, {0x54, 1, 0}} {
+	for _, b := range [][]byte{nil, {0x54}, {0x00, 1}, {0x54, 2}, {0x54, 2, 0}} {
 		if _, err := Parse(b); err == nil {
 			t.Fatalf("accepted %x", b)
 		}
@@ -81,7 +81,7 @@ func TestRejectsCorruption(t *testing.T) {
 }
 
 func FuzzParse(f *testing.F) {
-	f.Add([]byte{0x54, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0})
+	f.Add([]byte{0x54, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		h, err := Parse(b)
 		if err == nil && (h.Seq < 1 || len(h.Actor) != 32) {

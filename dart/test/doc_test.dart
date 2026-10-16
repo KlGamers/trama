@@ -180,4 +180,35 @@ void main() {
     expect(() => decodeChange(Uint8List.sublistView(blob, 0, blob.length - 1)), throwsA(isA<CodecError>()));
     expect(() => Doc(actor: 'nope'), throwsArgumentError);
   });
+
+  group('objects created concurrently under the same key', () {
+    test('merge their edits', () {
+      final x = Doc(actor: a), y = Doc(actor: b);
+      x.change((r) {
+        r.counter('c').increment(2);
+        r.text('t').insert(0, 'hola');
+        r.map('m').set('x', 1);
+      });
+      y.change((r) {
+        r.counter('c').increment(5);
+        r.text('t').insert(0, 'dart ');
+        r.map('m').set('y', 2);
+      });
+      sync([x, y]);
+      expect(x.toJson(), y.toJson());
+      final j = x.toJson() as Map;
+      expect(j['c'], 7);
+      expect(j['m'], {'x': 1, 'y': 2});
+      expect(['dart hola', 'holadart '], contains(j['t']));
+    });
+
+    test('deleting and recreating starts from scratch', () {
+      final x = Doc(actor: a);
+      x.change((r) => r.counter('c').increment(10));
+      x.change((r) => r.delete('c'));
+      x.change((r) => r.counter('c').increment(1));
+      expect(x.toJson(), {'c': 1});
+      expect((Doc(actor: b)..apply(x.changes())).toJson(), {'c': 1});
+    });
+  });
 }

@@ -9,7 +9,8 @@ import (
 
 const (
 	magic      = 0x54
-	version    = 1
+	version    = 2
+	maxDepth   = 64
 	actorBytes = 16
 	maxSafe    = 1<<53 - 1
 )
@@ -171,6 +172,42 @@ func Parse(buf []byte) (*Header, error) {
 		_, err = act()
 		return err
 	}
+	var ref func(depth int, required bool) error
+	ref = func(depth int, required bool) error {
+		if depth > maxDepth {
+			return r.fail("object reference too deep")
+		}
+		tag, err := r.u8()
+		if err != nil {
+			return err
+		}
+		switch tag {
+		case 0:
+			if required {
+				return r.fail("sequence and counter ops need an object")
+			}
+			return nil
+		case 1:
+			return id(true)
+		case 2:
+			if err := ref(depth+1, false); err != nil {
+				return err
+			}
+			if _, err := r.str(); err != nil {
+				return err
+			}
+			k, err := r.u8()
+			if err != nil {
+				return err
+			}
+			if k < 1 || k > 4 {
+				return r.fail("unknown object kind")
+			}
+			return id(false)
+		default:
+			return r.fail(fmt.Sprintf("unknown reference tag %d", tag))
+		}
+	}
 	val := func() error {
 		tag, err := r.u8()
 		if err != nil {
@@ -216,17 +253,17 @@ func Parse(buf []byte) (*Header, error) {
 		w := uint64(1)
 		switch t {
 		case 1:
-			err = firstErr(id(false), strErr(r), val())
+			err = firstErr(ref(0, false), strErr(r), val())
 		case 2:
-			err = firstErr(id(false), strErr(r), kind())
+			err = firstErr(ref(0, false), strErr(r), kind(), id(false))
 		case 3:
-			err = firstErr(id(false), strErr(r))
+			err = firstErr(ref(0, false), strErr(r))
 		case 4:
-			err = firstErr(id(true), id(false), val())
+			err = firstErr(ref(0, true), id(false), val())
 		case 5:
-			err = firstErr(id(true), id(false), kind())
+			err = firstErr(ref(0, true), id(false), kind())
 		case 6:
-			if err = firstErr(id(true), id(false)); err == nil {
+			if err = firstErr(ref(0, true), id(false)); err == nil {
 				var s string
 				if s, err = r.str(); err == nil {
 					if s == "" {
@@ -236,14 +273,14 @@ func Parse(buf []byte) (*Header, error) {
 				}
 			}
 		case 7:
-			if err = firstErr(id(true), id(true)); err == nil {
+			if err = firstErr(ref(0, true), id(true)); err == nil {
 				var n uint64
 				if n, err = r.uint(); err == nil && n < 1 {
 					err = r.fail("empty removal")
 				}
 			}
 		case 8:
-			err = firstErr(id(true), uintErr(r))
+			err = firstErr(ref(0, true), uintErr(r))
 		default:
 			err = r.fail(fmt.Sprintf("unknown op type %d", t))
 		}

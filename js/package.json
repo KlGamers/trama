@@ -1,7 +1,7 @@
 {
   "name": "trama",
   "version": "0.1.0",
-  "description": "Documentos local-first con CRDTs y sincronización autohospedada",
+  "description": "Documentos local-first con CRDTs y sincronizaci\u00f3n autohospedada",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,5 +24,16 @@
     "typescript": "^5.9.3",
     "vitest": "^3.2.7",
     "yjs": "^13.6.33"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KlGamers/trama"
+  },
+  "keywords": [
+    "crdt",
+    "local-first",
+    "offline",
+    "sync",
+    "collaboration"
+  ]
 }

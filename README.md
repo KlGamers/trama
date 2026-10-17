@@ -191,6 +191,7 @@ node e2e/run.mjs
 |---|---|
 | [hallar](https://github.com/KlGamers/hallar) | Búsqueda semántica sin internet en el teléfono |
 | [vecdex](https://github.com/KlGamers/vecdex) | Índice vectorial HNSW |
+| [verbo](https://github.com/KlGamers/verbo) | Inferencia de LLM en CPU, sin internet |
 | [guardia](https://github.com/KlGamers/guardia) | Revisión antes de cada commit |
 | [pulso](https://github.com/KlGamers/pulso) | Monitoreo del servidor autohospedado |
 
